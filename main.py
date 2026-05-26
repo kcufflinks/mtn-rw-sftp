@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 import json
 import os
-import smtplib
 import socket
 import sys
 import time
 from datetime import datetime, UTC
-from email.message import EmailMessage
 from pathlib import Path
 
 import paramiko
@@ -36,9 +34,7 @@ REQUIRED_ENV_VARS = [
     "SFTP_PORT",
     "SFTP_USERNAME",
     "SFTP_PASSWORD",
-    "GMAIL_ADDRESS",
-    "GMAIL_APP_PASSWORD",
-    "EMAIL_RECIPIENTS",
+    "GCHAT_WEBHOOK_URL",
 ]
 
 
@@ -59,7 +55,6 @@ def load_config() -> dict:
         if isinstance(config[k], str):
             config[k] = config[k].strip()
     config["SFTP_PORT"] = int(config["SFTP_PORT"])
-    config["EMAIL_CC"] = (os.getenv("EMAIL_CC") or "").strip()
     dc = (os.getenv("ZOHO_DATA_CENTER") or "us").strip().lower()
     if dc not in ZOHO_DATA_CENTERS:
         print(
@@ -308,56 +303,27 @@ def upload_to_sftp(config: dict, local_file: Path) -> str:
         sys.exit(1)
 
 
-def send_email(config: dict, local_file: Path, remote_path: str) -> tuple[int, int]:
-    print("Sending email notification...")
-    sender = config["GMAIL_ADDRESS"]
-    password = config["GMAIL_APP_PASSWORD"]
-    to_list = [r.strip() for r in config["EMAIL_RECIPIENTS"].split(",") if r.strip()]
-    cc_raw = config.get("EMAIL_CC") or ""
-    cc_list = [r.strip() for r in cc_raw.split(",") if r.strip()]
-    all_recipients = list(dict.fromkeys(to_list + cc_list))
-    msg = EmailMessage()
-    msg["From"] = sender
-    msg["To"] = ", ".join(to_list)
-    if cc_list:
-        msg["Cc"] = ", ".join(cc_list)
-    msg["Subject"] = "MTN RW Daily SFTP Upload"
-    body = f"The CSV file has been uploaded to the SFTP server.\n\nFile: {local_file.name}\nRemote path: {remote_path}"
-    msg.set_content(body, charset="utf-8")
-    data = local_file.read_bytes()
-    msg.add_attachment(
-        data,
-        maintype="text",
-        subtype="csv",
-        filename=local_file.name,
-    )
+def send_gchat_notification(config: dict, local_file: Path, remote_path: str) -> None:
+    print("Sending Google Chat notification...")
+    webhook_url = config["GCHAT_WEBHOOK_URL"]
+    timestamp = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
+    message = {
+        "text": (
+            "*MTN RW Daily SFTP Upload Complete*\n\n"
+            f"File: `{local_file.name}`\n"
+            f"Remote path: `{remote_path}`\n"
+            f"Timestamp: {timestamp}"
+        )
+    }
     try:
-        with smtplib.SMTP("smtp.gmail.com", 587) as server:
-            server.starttls()
-            server.login(sender, password)
-            refused = server.send_message(msg)
-        if refused:
-            print(f"ERROR: SMTP refused these recipients: {refused}")
-            print(f"  Attempted: To={to_list!r} CC={cc_list!r}")
+        response = requests.post(webhook_url, json=message, timeout=30)
+        if response.status_code != 200:
+            print(f"ERROR: Google Chat notification failed. Status: {response.status_code}")
+            print(f"Response: {response.text}")
             sys.exit(1)
-        cc_msg = f", {len(cc_list)} on CC" if cc_list else ""
-        print(
-            f"SUCCESS: Gmail accepted the message for {len(all_recipients)} address(es) "
-            f"({len(to_list)} To{cc_msg})."
-        )
-        print(f"  To:  {', '.join(to_list)}")
-        if cc_list:
-            print(f"  CC:  {', '.join(cc_list)}")
-        print(
-            "  If you do not see it in the inbox, check Spam / Promotions and that these "
-            "addresses match the mailbox you are checking. Corporate inboxes may delay or quarantine."
-        )
-        return len(to_list), len(cc_list)
-    except smtplib.SMTPAuthenticationError:
-        print("ERROR: Gmail authentication failed. Check your email/app password.")
-        sys.exit(1)
+        print("SUCCESS: Posted notification to Google Chat.")
     except Exception as e:
-        print(f"ERROR: Failed to send email: {e}")
+        print(f"ERROR: Failed to send Google Chat notification: {e}")
         sys.exit(1)
 
 
@@ -388,14 +354,14 @@ def main():
     remote_path = upload_to_sftp(config, local_file)
     print()
 
-    to_n, cc_n = send_email(config, local_file, remote_path)
+    send_gchat_notification(config, local_file, remote_path)
     print()
 
     print("=" * 60)
     print("COMPLETE!")
     print(f"  File: {local_file.name}")
     print(f"  SFTP: {remote_path}")
-    print(f"  Email: {to_n} To" + (f", {cc_n} CC" if cc_n else ""))
+    print(f"  Notified: Google Chat")
     print("=" * 60)
 
 
