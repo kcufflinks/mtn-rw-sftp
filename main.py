@@ -51,6 +51,7 @@ def load_config() -> dict:
         print(f"ERROR: Missing required environment variables: {', '.join(missing)}")
         print("Please check your .env file and ensure all required values are set.")
         sys.exit(1)
+    config["SFTP_REMOTE_DIR"] = (os.getenv("SFTP_REMOTE_DIR") or "").strip()
     for k in list(config):
         if isinstance(config[k], str):
             config[k] = config[k].strip()
@@ -262,6 +263,10 @@ def upload_to_sftp(config: dict, local_file: Path) -> str:
         transport = paramiko.Transport((host, port))
         transport.connect(username=username, password=password)
         sftp = paramiko.SFTPClient.from_transport(transport)
+
+        cwd = sftp.getcwd()
+        print(f"  SFTP session working directory: {cwd!r}")
+
         used = primary
         for path in attempts:
             try:
@@ -271,6 +276,33 @@ def upload_to_sftp(config: dict, local_file: Path) -> str:
             except OSError as e:
                 if e.errno != 13 or path == attempts[-1]:
                     raise
+                print(f"  Permission denied writing to {path!r}, trying fallback...")
+
+        # Verify the file actually landed on the server
+        try:
+            remote_stat = sftp.stat(used)
+            local_size = local_file.stat().st_size
+            remote_size = remote_stat.st_size
+            print(f"  Verified remote file: {used!r} ({remote_size} bytes)")
+            if remote_size != local_size:
+                print(
+                    f"  WARNING: Size mismatch! Local={local_size} bytes, "
+                    f"Remote={remote_size} bytes. The file may be corrupt or truncated."
+                )
+        except OSError as stat_err:
+            print(
+                f"  WARNING: Could not stat remote file after upload: {stat_err}\n"
+                f"  The put() call succeeded but the file could not be confirmed at {used!r}."
+            )
+
+        # List the target directory so it's visible in logs
+        try:
+            target_dir = str(Path(used).parent) if "/" in used else "."
+            listing = sftp.listdir(target_dir)
+            print(f"  Remote directory listing ({target_dir!r}): {listing}")
+        except OSError:
+            pass
+
         sftp.close()
         transport.close()
         if used != primary:
