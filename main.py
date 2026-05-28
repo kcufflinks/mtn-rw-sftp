@@ -51,6 +51,7 @@ def load_config() -> dict:
         print(f"ERROR: Missing required environment variables: {', '.join(missing)}")
         print("Please check your .env file and ensure all required values are set.")
         sys.exit(1)
+    config["SFTP_REMOTE_DIR"] = (os.getenv("SFTP_REMOTE_DIR") or "").strip()
     for k in list(config):
         if isinstance(config[k], str):
             config[k] = config[k].strip()
