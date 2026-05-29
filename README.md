@@ -1,13 +1,13 @@
 # MTN RW Daily SFTP Upload
 
-A Python script that exports data from Zoho Analytics, uploads the CSV to an SFTP server, and sends an email notification with the file attached.
+A Python script that exports data from Zoho Analytics, uploads the CSV to an SFTP server, and posts a **Google Chat** notification on success with enough detail to debug server, path, and file-size issues.
 
 ## Prerequisites
 
 - Python 3.10+
 - VPN access to reach the SFTP server (10.150.97.169:9000)
 - Zoho Analytics API credentials (see setup below)
-- Gmail account with an App Password
+- A Google Chat space webhook URL
 
 ## One-time Setup
 
@@ -27,7 +27,12 @@ cp .env.example .env
 
 Then edit `.env` with your values.
 
-**To and CC:** `EMAIL_RECIPIENTS` is the main To list (comma-separated). To copy others without putting them in To, set optional `EMAIL_CC` to a comma-separated list of addresses.
+| Variable | Purpose |
+|----------|---------|
+| `ZOHO_*` | OAuth client, refresh token, org/workspace IDs, and export SQL |
+| `SFTP_HOST`, `SFTP_PORT`, `SFTP_USERNAME`, `SFTP_PASSWORD` | SFTP endpoint and credentials |
+| `SFTP_REMOTE_DIR` | Subfolder under the SFTP account’s login directory (see below) |
+| `GCHAT_WEBHOOK_URL` | Incoming webhook for success notifications |
 
 ### 3. Set up Zoho Analytics API credentials
 
@@ -54,9 +59,10 @@ The refresh token is long-lived. The script uses it to get a fresh access token 
 
 **Region (if token requests fail):** Zoho splits accounts by region (US `.com`, EU, India, etc.). If you see errors when obtaining the access token, set `ZOHO_DATA_CENTER` in `.env` to match your org (for example `eu` or `in`). The API Console you use must match the same region (e.g. [api-console.zoho.eu](https://api-console.zoho.eu) for EU). When exchanging the authorization code for a refresh token, the `curl` URL must use the same accounts host (e.g. `https://accounts.zoho.eu/oauth/v2/token` for EU), not only `accounts.zoho.com`.
 
-### 4. Find your Zoho Org ID and Workspace ID
+### 5. Find your Zoho Org ID and Workspace ID
 
 You can find these in the Zoho Analytics URL when viewing your workspace:
+
 `https://analytics.zoho.com/workspace/WORKSPACE_ID/...`
 
 Or use the Zoho Analytics API to list organizations and workspaces.
@@ -77,6 +83,14 @@ Set `ZOHO_SQL_QUERY` in your `.env` to the SQL query that exports your data:
 ZOHO_SQL_QUERY=select * from "YourTableName"
 ```
 
+### 7. Set up Google Chat webhook
+
+1. Open the Google Chat **space** that should receive run notifications.
+2. **Apps & integrations** → **Webhooks** → **Add webhook**.
+3. Name it (e.g. "MTN RW SFTP") and copy the webhook URL into `GCHAT_WEBHOOK_URL` in `.env`.
+
+**Security:** Anyone with the webhook URL can post to that space. Treat it like a secret; do not commit `.env`.
+
 ## Daily Usage
 
 1. Connect to the VPN
@@ -87,15 +101,34 @@ python main.py
 ```
 
 The script will:
-- Verify connectivity to the SFTP server
-- Export data from Zoho Analytics
-- Save the CSV to `./exports/mtn_rw_YYYY-MM-DD_HHMMSS.csv`
-- Upload the file to the SFTP server
-- Send an email notification with the file attached
+
+1. Verify TCP connectivity to `SFTP_HOST:SFTP_PORT`
+2. Obtain a Zoho access token and create a bulk export job
+3. Poll until the export completes
+4. Save the CSV to `./exports/mtn_rw_YYYY-MM-DD_HHMMSS.csv`
+5. Upload to the SFTP server 
+6. Post a **success** message to Google Chat
+
+On failure, the script prints errors to the terminal and exits with code `1`. **Failure notifications to Chat are not implemented yet**—only successful runs post to the webhook.
+
+
+| Field | Meaning |
+|-------|---------|
+| **Server / User** | Which SFTP endpoint and account were used |
+| **Configured dir** | `SFTP_REMOTE_DIR` from `.env`, or `(not set)` |
+| **Session directory** | SFTP working directory after login (`getcwd`) |
+| **Remote file** | Path passed to `put()` |
+| **Resolved** | Best-effort full path (session dir + remote file) |
+| **Size** | Local vs remote bytes; ✓ or ⚠️ mismatch |
+| **Fallback path used** | `yes` if upload used `upload/...` instead of the primary path |
+| **Zoho job** | Export job ID for Zoho support |
+| **Duration** | Wall time for the whole run |
+
+Use **Server**, **User**, **Session directory**, and **Resolved** when coordinating with your SFTP administrator about folder location.
 
 ## Testing locally
 
-The script is end-to-end: it needs a working VPN to the SFTP host, valid Zoho credentials, and Gmail.
+The script is end-to-end: it needs a working VPN to the SFTP host (if applicable), valid Zoho credentials, and a valid Chat webhook.
 
 1. **Create a virtual environment (optional but recommended)**
 
@@ -105,9 +138,9 @@ The script is end-to-end: it needs a working VPN to the SFTP host, valid Zoho cr
    pip install -r requirements.txt
    ```
 
-2. **Use a real `.env`** with all variables filled. Point `EMAIL_RECIPIENTS` (and `EMAIL_CC` if needed) to your own test addresses for the first run if you want to avoid sending to production lists.
+2. **Use a real `.env`** with all required variables filled. Use a **test Chat space** webhook for first runs if you do not want production alerts.
 
-3. **Connect the VPN** so `10.150.97.169:9000` is reachable. The first step the script runs is a TCP check to the SFTP host; if that fails, fix VPN before debugging anything else.
+3. **Connect the VPN** so your `SFTP_HOST:SFTP_PORT` is reachable. The first step is a TCP check; if that fails, fix VPN before debugging anything else.
 
 4. **Run**
 
@@ -115,15 +148,16 @@ The script is end-to-end: it needs a working VPN to the SFTP host, valid Zoho cr
    python main.py
    ```
 
-5. **Verify:** Check `./exports/` for the CSV, confirm the file on the SFTP server, and check your inbox (and CC inboxes) for the email. If something fails, the script prints which step failed.
+5. **Verify:** Check `./exports/` for the CSV, confirm the file on the SFTP server under `SFTP_REMOTE_DIR`, and check the Google Chat space for the success message.
 
-You cannot fully test the SFTP step without network access to that host; the Zoho and Gmail parts need real API and SMTP credentials (no separate mock mode in this project).
+You cannot fully test the SFTP step without network access to that host. There is no separate mock mode in this project.
 
 ## Troubleshooting
 
 ### "Cannot reach SFTP server"
+
 - Make sure you are connected to the VPN
-- Check that the VPN is active and connected
+- Confirm `SFTP_HOST` and `SFTP_PORT` in `.env` match what your administrator provided
 
 ### "Failed to get Zoho access token"
 - Set `ZOHO_DATA_CENTER` to your Zoho region (`us`/`com`, `eu`, `in`, etc.); US orgs usually use `us` or `com`
@@ -131,13 +165,24 @@ You cannot fully test the SFTP step without network access to that host; the Zoh
 - Do not paste a one-time **authorization code** where the **refresh token** belongs; you need the `refresh_token` field from the token exchange response
 
 ### "SFTP authentication failed"
-- Check your SFTP username and password in `.env`
 
-### "Gmail authentication failed"
-- Make sure you're using an App Password, not your regular Gmail password
-- Verify 2-Step Verification is enabled on your Google account
+- Check `SFTP_USERNAME` and `SFTP_PASSWORD` in `.env`
 
-### Script says the email was sent but nothing arrived
-- Confirm the **To** / **CC** lines printed at the end match the inboxes you are checking
-- Check **Spam**, **Promotions** (Gmail), and quarantine in corporate email
-- A successful SMTP handoff only means Gmail accepted the message; the receiving domain may still filter or delay it
+### SFTP upload permission denied / "no such file"
+
+- Confirm `SFTP_REMOTE_DIR` matches what the server owner expects
+- For Docker `atmoz/sftp`, try `SFTP_REMOTE_DIR=upload`
+
+### Size mismatch in Chat or logs
+
+- Re-run the export; if it persists, check VPN stability and SFTP server disk/quota
+
+### Google Chat notification failed
+
+- Verify `GCHAT_WEBHOOK_URL` is correct and the webhook was not deleted
+- Confirm the Chat space still allows incoming webhooks
+- A failed Chat post exits with code `1` even if the SFTP upload succeeded—fix the webhook and re-check the file on SFTP
+
+### Run failed but nothing in Chat
+
+- Expected today: only **successful** runs post to Google Chat. Check terminal output and exit code for failures.
