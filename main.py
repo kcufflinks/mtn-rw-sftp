@@ -248,7 +248,7 @@ def sftp_remote_object_path(remote_dir: str, filename: str) -> str:
     return f"{d.rstrip('/')}/{filename}"
 
 
-def upload_to_sftp(config: dict, local_file: Path) -> str:
+def upload_to_sftp(config: dict, local_file: Path) -> tuple[str, str]:
     print(f"Uploading {local_file.name} to SFTP server...")
     host = config["SFTP_HOST"]
     port = config["SFTP_PORT"]
@@ -264,7 +264,7 @@ def upload_to_sftp(config: dict, local_file: Path) -> str:
         transport.connect(username=username, password=password)
         sftp = paramiko.SFTPClient.from_transport(transport)
 
-        cwd = sftp.getcwd()
+        cwd = sftp.getcwd() or "."
         print(f"  SFTP session working directory: {cwd!r}")
 
         used = primary
@@ -311,7 +311,7 @@ def upload_to_sftp(config: dict, local_file: Path) -> str:
                 "SFTP_REMOTE_DIR=upload in .env so this is explicit."
             )
         print(f"SUCCESS: Uploaded to {used}")
-        return used
+        return used, cwd
     except paramiko.AuthenticationException:
         print("ERROR: SFTP authentication failed. Check your username/password.")
         sys.exit(1)
@@ -335,7 +335,12 @@ def upload_to_sftp(config: dict, local_file: Path) -> str:
         sys.exit(1)
 
 
-def send_gchat_notification(config: dict, local_file: Path, remote_path: str) -> None:
+def send_gchat_notification(
+    config: dict,
+    local_file: Path,
+    remote_path: str,
+    sftp_cwd: str,
+) -> None:
     print("Sending Google Chat notification...")
     webhook_url = config["GCHAT_WEBHOOK_URL"]
     timestamp = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
@@ -343,6 +348,7 @@ def send_gchat_notification(config: dict, local_file: Path, remote_path: str) ->
         "text": (
             "*MTN RW Daily SFTP Upload Complete*\n\n"
             f"File: `{local_file.name}`\n"
+            f"SFTP session directory: `{sftp_cwd}`\n"
             f"Remote path: `{remote_path}`\n"
             f"Timestamp: {timestamp}"
         )
@@ -383,15 +389,16 @@ def main():
     local_file = download_export(config, access_token, job_id)
     print()
 
-    remote_path = upload_to_sftp(config, local_file)
+    remote_path, sftp_cwd = upload_to_sftp(config, local_file)
     print()
 
-    send_gchat_notification(config, local_file, remote_path)
+    send_gchat_notification(config, local_file, remote_path, sftp_cwd)
     print()
 
     print("=" * 60)
     print("COMPLETE!")
     print(f"  File: {local_file.name}")
+    print(f"  SFTP session directory: {sftp_cwd}")
     print(f"  SFTP: {remote_path}")
     print(f"  Notified: Google Chat")
     print("=" * 60)
