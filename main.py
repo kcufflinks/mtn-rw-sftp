@@ -4,8 +4,9 @@ import os
 import socket
 import sys
 import time
+from dataclasses import dataclass
 from datetime import datetime, UTC
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import paramiko
 import requests
@@ -248,7 +249,39 @@ def sftp_remote_object_path(remote_dir: str, filename: str) -> str:
     return f"{d.rstrip('/')}/{filename}"
 
 
-def upload_to_sftp(config: dict, local_file: Path) -> str:
+def sftp_resolved_path(cwd: str, remote_path: str) -> str:
+    if remote_path.startswith("/"):
+        return remote_path
+    base = PurePosixPath(cwd if cwd not in ("", ".") else ".")
+    return str(base / remote_path)
+
+
+def format_size_mb(size_bytes: int) -> str:
+    return f"{size_bytes / (1024 * 1024):.2f} MB"
+
+
+def format_duration(seconds: float) -> str:
+    total = int(seconds)
+    if total < 60:
+        return f"{total}s"
+    minutes, secs = divmod(total, 60)
+    if minutes < 60:
+        return f"{minutes}m {secs}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h {minutes}m {secs}s"
+
+
+@dataclass
+class SftpUploadResult:
+    remote_path: str
+    sftp_cwd: str
+    used_fallback: bool
+    local_size: int
+    remote_size: int | None
+    size_matched: bool | None
+
+
+def upload_to_sftp(config: dict, local_file: Path) -> SftpUploadResult:
     print(f"Uploading {local_file.name} to SFTP server...")
     host = config["SFTP_HOST"]
     port = config["SFTP_PORT"]
@@ -264,7 +297,7 @@ def upload_to_sftp(config: dict, local_file: Path) -> str:
         transport.connect(username=username, password=password)
         sftp = paramiko.SFTPClient.from_transport(transport)
 
-        cwd = sftp.getcwd()
+        cwd = sftp.getcwd() or "."
         print(f"  SFTP session working directory: {cwd!r}")
 
         used = primary
@@ -278,13 +311,15 @@ def upload_to_sftp(config: dict, local_file: Path) -> str:
                     raise
                 print(f"  Permission denied writing to {path!r}, trying fallback...")
 
-        # Verify the file actually landed on the server
+        local_size = local_file.stat().st_size
+        remote_size: int | None = None
+        size_matched: bool | None = None
         try:
             remote_stat = sftp.stat(used)
-            local_size = local_file.stat().st_size
             remote_size = remote_stat.st_size
+            size_matched = remote_size == local_size
             print(f"  Verified remote file: {used!r} ({remote_size} bytes)")
-            if remote_size != local_size:
+            if not size_matched:
                 print(
                     f"  WARNING: Size mismatch! Local={local_size} bytes, "
                     f"Remote={remote_size} bytes. The file may be corrupt or truncated."
@@ -311,7 +346,14 @@ def upload_to_sftp(config: dict, local_file: Path) -> str:
                 "SFTP_REMOTE_DIR=upload in .env so this is explicit."
             )
         print(f"SUCCESS: Uploaded to {used}")
-        return used
+        return SftpUploadResult(
+            remote_path=used,
+            sftp_cwd=cwd,
+            used_fallback=used != primary,
+            local_size=local_size,
+            remote_size=remote_size,
+            size_matched=size_matched,
+        )
     except paramiko.AuthenticationException:
         print("ERROR: SFTP authentication failed. Check your username/password.")
         sys.exit(1)
@@ -335,16 +377,45 @@ def upload_to_sftp(config: dict, local_file: Path) -> str:
         sys.exit(1)
 
 
-def send_gchat_notification(config: dict, local_file: Path, remote_path: str) -> None:
+def _format_size_line(upload: SftpUploadResult) -> str:
+    local = format_size_mb(upload.local_size)
+    if upload.remote_size is None:
+        return f"Size: {local} (local) / unknown (remote)"
+    remote = format_size_mb(upload.remote_size)
+    if upload.size_matched is True:
+        return f"Size: {local} (local) / {remote} (remote) ✓"
+    if upload.size_matched is False:
+        return f"Size: {local} (local) / {remote} (remote) ⚠️ mismatch"
+    return f"Size: {local} (local) / {remote} (remote)"
+
+
+def send_gchat_notification(
+    config: dict,
+    local_file: Path,
+    upload: SftpUploadResult,
+    job_id: str,
+    duration_seconds: float,
+) -> None:
     print("Sending Google Chat notification...")
     webhook_url = config["GCHAT_WEBHOOK_URL"]
     timestamp = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
+    remote_dir = (config.get("SFTP_REMOTE_DIR") or "").strip()
+    configured_dir = remote_dir if remote_dir else "(not set)"
+    resolved = sftp_resolved_path(upload.sftp_cwd, upload.remote_path)
+    fallback = "yes" if upload.used_fallback else "no"
     message = {
         "text": (
             "*MTN RW Daily SFTP Upload Complete*\n\n"
-            f"File: `{local_file.name}`\n"
-            f"Remote path: `{remote_path}`\n"
-            f"Timestamp: {timestamp}"
+            f"Server: `{config['SFTP_HOST']}:{config['SFTP_PORT']}`  "
+            f"User: `{config['SFTP_USERNAME']}`\n"
+            f"Configured dir: `{configured_dir}`\n"
+            f"Session directory: `{upload.sftp_cwd}`\n"
+            f"Remote file: `{upload.remote_path}`\n"
+            f"Resolved: `{resolved}`\n"
+            f"{_format_size_line(upload)}\n"
+            f"Fallback path used: {fallback}\n\n"
+            f"Timestamp: {timestamp}\n"
+            f"Zoho job: `{job_id}` · Duration: {format_duration(duration_seconds)}"
         )
     }
     try:
@@ -360,6 +431,7 @@ def send_gchat_notification(config: dict, local_file: Path, remote_path: str) ->
 
 
 def main():
+    run_started = time.monotonic()
     print("=" * 60)
     print("MTN RW Daily SFTP Upload Script")
     print("=" * 60)
@@ -383,16 +455,19 @@ def main():
     local_file = download_export(config, access_token, job_id)
     print()
 
-    remote_path = upload_to_sftp(config, local_file)
+    upload = upload_to_sftp(config, local_file)
     print()
 
-    send_gchat_notification(config, local_file, remote_path)
+    duration_seconds = time.monotonic() - run_started
+    send_gchat_notification(config, local_file, upload, job_id, duration_seconds)
     print()
 
     print("=" * 60)
     print("COMPLETE!")
     print(f"  File: {local_file.name}")
-    print(f"  SFTP: {remote_path}")
+    print(f"  SFTP session directory: {upload.sftp_cwd}")
+    print(f"  SFTP: {upload.remote_path}")
+    print(f"  Duration: {format_duration(duration_seconds)}")
     print(f"  Notified: Google Chat")
     print("=" * 60)
 
