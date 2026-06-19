@@ -31,6 +31,7 @@ REQUIRED_ENV_VARS = [
     "ZOHO_ORG_ID",
     "ZOHO_WORKSPACE_ID",
     "ZOHO_SQL_QUERY",
+    "ZOHO_SQL_QUERY_2",
     "SFTP_HOST",
     "SFTP_PORT",
     "SFTP_USERNAME",
@@ -70,6 +71,12 @@ def load_config() -> dict:
         api = os.getenv("ZOHO_ANALYTICS_BASE_URL", "").strip()
     config["ZOHO_ACCOUNTS_BASE"] = acc.rstrip("/")
     config["ZOHO_ANALYTICS_BASE"] = api.rstrip("/")
+    config["ZOHO_EXPORT_1_FILENAME_PREFIX"] = (
+        os.getenv("ZOHO_EXPORT_1_FILENAME_PREFIX") or "mtn_rw_payins"
+    ).strip()
+    config["ZOHO_EXPORT_2_FILENAME_PREFIX"] = (
+        os.getenv("ZOHO_EXPORT_2_FILENAME_PREFIX") or "mtn_rw_contracts"
+    ).strip()
     return config
 
 
@@ -138,14 +145,14 @@ def get_zoho_access_token(config: dict) -> str:
     return token_data["access_token"]
 
 
-def create_export_job(config: dict, access_token: str) -> str:
-    print("Creating Zoho Analytics export job...")
+def create_export_job(config: dict, access_token: str, sql_query: str, label: str) -> str:
+    print(f"Creating Zoho Analytics export job ({label})...")
     workspace_id = config["ZOHO_WORKSPACE_ID"]
     org_id = config["ZOHO_ORG_ID"]
     base = config["ZOHO_ANALYTICS_BASE"]
     url = f"{base}/restapi/v2/bulk/workspaces/{workspace_id}/data"
     export_config = {
-        "sqlQuery": config["ZOHO_SQL_QUERY"],
+        "sqlQuery": sql_query,
         "responseFormat": "csv",
     }
     config_json = json.dumps(export_config)
@@ -177,8 +184,8 @@ def _as_int(value):
         return None
 
 
-def poll_export_job(config: dict, access_token: str, job_id: str) -> None:
-    print("Polling export job status...")
+def poll_export_job(config: dict, access_token: str, job_id: str, label: str) -> None:
+    print(f"Polling export job status ({label})...")
     workspace_id = config["ZOHO_WORKSPACE_ID"]
     org_id = config["ZOHO_ORG_ID"]
     base = config["ZOHO_ANALYTICS_BASE"]
@@ -216,8 +223,22 @@ def poll_export_job(config: dict, access_token: str, job_id: str) -> None:
         time.sleep(5)
 
 
-def download_export(config: dict, access_token: str, job_id: str) -> Path:
-    print("Downloading exported CSV...")
+@dataclass
+class ExportResult:
+    local_file: Path
+    job_id: str
+    label: str
+
+
+def download_export(
+    config: dict,
+    access_token: str,
+    job_id: str,
+    filename_prefix: str,
+    timestamp: str,
+    label: str,
+) -> Path:
+    print(f"Downloading exported CSV ({label})...")
     workspace_id = config["ZOHO_WORKSPACE_ID"]
     org_id = config["ZOHO_ORG_ID"]
     base = config["ZOHO_ANALYTICS_BASE"]
@@ -228,18 +249,35 @@ def download_export(config: dict, access_token: str, job_id: str) -> Path:
     }
     response = requests.get(url, headers=headers)
     if response.status_code != 200:
-        print(f"ERROR: Failed to download export. Status: {response.status_code}")
+        print(f"ERROR: Failed to download export ({label}). Status: {response.status_code}")
         print(f"Response: {response.text}")
         sys.exit(1)
     exports_dir = Path("exports")
     exports_dir.mkdir(exist_ok=True)
-    timestamp = datetime.now(UTC).strftime("%Y-%m-%d_%H%M%S")
-    filename = f"mtn_rw_{timestamp}.csv"
+    filename = f"{filename_prefix}_{timestamp}.csv"
     filepath = exports_dir / filename
     filepath.write_bytes(response.content)
     file_size_mb = len(response.content) / (1024 * 1024)
     print(f"SUCCESS: Saved to {filepath} ({file_size_mb:.2f} MB)")
     return filepath
+
+
+def run_export(
+    config: dict,
+    access_token: str,
+    sql_query: str,
+    filename_prefix: str,
+    timestamp: str,
+    label: str,
+) -> ExportResult:
+    job_id = create_export_job(config, access_token, sql_query, label)
+    print()
+    poll_export_job(config, access_token, job_id, label)
+    print()
+    local_file = download_export(
+        config, access_token, job_id, filename_prefix, timestamp, label
+    )
+    return ExportResult(local_file=local_file, job_id=job_id, label=label)
 
 
 def sftp_remote_object_path(remote_dir: str, filename: str) -> str:
@@ -249,9 +287,17 @@ def sftp_remote_object_path(remote_dir: str, filename: str) -> str:
     return f"{d.rstrip('/')}/{filename}"
 
 
-def sftp_resolved_path(cwd: str, remote_path: str) -> str:
+def format_sftp_cwd(cwd: str | None) -> str:
+    if cwd is None:
+        return "(not reported by server)"
+    return cwd
+
+
+def sftp_resolved_path(cwd: str | None, remote_path: str) -> str:
     if remote_path.startswith("/"):
         return remote_path
+    if cwd is None:
+        return f"{remote_path} (relative; session directory not reported)"
     base = PurePosixPath(cwd if cwd not in ("", ".") else ".")
     return str(base / remote_path)
 
@@ -273,64 +319,57 @@ def format_duration(seconds: float) -> str:
 
 @dataclass
 class SftpUploadResult:
+    local_file: Path
     remote_path: str
-    sftp_cwd: str
+    sftp_cwd: str | None
     used_fallback: bool
     local_size: int
     remote_size: int | None
     size_matched: bool | None
 
 
-def upload_to_sftp(config: dict, local_file: Path) -> SftpUploadResult:
-    print(f"Uploading {local_file.name} to SFTP server...")
-    host = config["SFTP_HOST"]
-    port = config["SFTP_PORT"]
-    username = config["SFTP_USERNAME"]
-    password = config["SFTP_PASSWORD"]
-    remote_dir = config.get("SFTP_REMOTE_DIR") or "/"
+def _upload_file_on_sftp(
+    sftp: paramiko.SFTPClient,
+    local_file: Path,
+    remote_dir: str,
+    list_dir_after: bool,
+) -> SftpUploadResult:
     primary = sftp_remote_object_path(remote_dir, local_file.name)
     attempts = [primary]
     if primary == local_file.name:
         attempts.append(f"upload/{local_file.name}")
-    try:
-        transport = paramiko.Transport((host, port))
-        transport.connect(username=username, password=password)
-        sftp = paramiko.SFTPClient.from_transport(transport)
 
-        cwd = sftp.getcwd() or "."
-        print(f"  SFTP session working directory: {cwd!r}")
-
-        used = primary
-        for path in attempts:
-            try:
-                sftp.put(str(local_file), path)
-                used = path
-                break
-            except OSError as e:
-                if e.errno != 13 or path == attempts[-1]:
-                    raise
-                print(f"  Permission denied writing to {path!r}, trying fallback...")
-
-        local_size = local_file.stat().st_size
-        remote_size: int | None = None
-        size_matched: bool | None = None
+    used = primary
+    for path in attempts:
         try:
-            remote_stat = sftp.stat(used)
-            remote_size = remote_stat.st_size
-            size_matched = remote_size == local_size
-            print(f"  Verified remote file: {used!r} ({remote_size} bytes)")
-            if not size_matched:
-                print(
-                    f"  WARNING: Size mismatch! Local={local_size} bytes, "
-                    f"Remote={remote_size} bytes. The file may be corrupt or truncated."
-                )
-        except OSError as stat_err:
-            print(
-                f"  WARNING: Could not stat remote file after upload: {stat_err}\n"
-                f"  The put() call succeeded but the file could not be confirmed at {used!r}."
-            )
+            sftp.put(str(local_file), path)
+            used = path
+            break
+        except OSError as e:
+            if e.errno != 13 or path == attempts[-1]:
+                raise
+            print(f"  Permission denied writing to {path!r}, trying fallback...")
 
-        # List the target directory so it's visible in logs
+    local_size = local_file.stat().st_size
+    remote_size: int | None = None
+    size_matched: bool | None = None
+    try:
+        remote_stat = sftp.stat(used)
+        remote_size = remote_stat.st_size
+        size_matched = remote_size == local_size
+        print(f"  Verified remote file: {used!r} ({remote_size} bytes)")
+        if not size_matched:
+            print(
+                f"  WARNING: Size mismatch! Local={local_size} bytes, "
+                f"Remote={remote_size} bytes. The file may be corrupt or truncated."
+            )
+    except OSError as stat_err:
+        print(
+            f"  WARNING: Could not stat remote file after upload: {stat_err}\n"
+            f"  The put() call succeeded but the file could not be confirmed at {used!r}."
+        )
+
+    if list_dir_after:
         try:
             target_dir = str(Path(used).parent) if "/" in used else "."
             listing = sftp.listdir(target_dir)
@@ -338,22 +377,56 @@ def upload_to_sftp(config: dict, local_file: Path) -> SftpUploadResult:
         except OSError:
             pass
 
+    if used != primary:
+        print(
+            "Note: Upload used a fallback path (upload/). For Docker atmoz/sftp, set "
+            "SFTP_REMOTE_DIR=upload in .env so this is explicit."
+        )
+    print(f"SUCCESS: Uploaded to {used}")
+    return SftpUploadResult(
+        local_file=local_file,
+        remote_path=used,
+        sftp_cwd=sftp.getcwd(),
+        used_fallback=used != primary,
+        local_size=local_size,
+        remote_size=remote_size,
+        size_matched=size_matched,
+    )
+
+
+def upload_files_to_sftp(config: dict, local_files: list[Path]) -> list[SftpUploadResult]:
+    if not local_files:
+        return []
+
+    print(f"Uploading {len(local_files)} file(s) to SFTP server...")
+    host = config["SFTP_HOST"]
+    port = config["SFTP_PORT"]
+    username = config["SFTP_USERNAME"]
+    password = config["SFTP_PASSWORD"]
+    remote_dir = config.get("SFTP_REMOTE_DIR") or "/"
+    try:
+        transport = paramiko.Transport((host, port))
+        transport.connect(username=username, password=password)
+        sftp = paramiko.SFTPClient.from_transport(transport)
+
+        cwd = sftp.getcwd()
+        print(f"  SFTP session working directory: {format_sftp_cwd(cwd)!r}")
+
+        uploads: list[SftpUploadResult] = []
+        for index, local_file in enumerate(local_files):
+            print(f"Uploading {local_file.name}...")
+            uploads.append(
+                _upload_file_on_sftp(
+                    sftp,
+                    local_file,
+                    remote_dir,
+                    list_dir_after=index == len(local_files) - 1,
+                )
+            )
+
         sftp.close()
         transport.close()
-        if used != primary:
-            print(
-                "Note: Upload used a fallback path (upload/). For Docker atmoz/sftp, set "
-                "SFTP_REMOTE_DIR=upload in .env so this is explicit."
-            )
-        print(f"SUCCESS: Uploaded to {used}")
-        return SftpUploadResult(
-            remote_path=used,
-            sftp_cwd=cwd,
-            used_fallback=used != primary,
-            local_size=local_size,
-            remote_size=remote_size,
-            size_matched=size_matched,
-        )
+        return uploads
     except paramiko.AuthenticationException:
         print("ERROR: SFTP authentication failed. Check your username/password.")
         sys.exit(1)
@@ -389,11 +462,22 @@ def _format_size_line(upload: SftpUploadResult) -> str:
     return f"Size: {local} (local) / {remote} (remote)"
 
 
+def _format_upload_block(upload: SftpUploadResult) -> str:
+    resolved = sftp_resolved_path(upload.sftp_cwd, upload.remote_path)
+    fallback = "yes" if upload.used_fallback else "no"
+    return (
+        f"File: `{upload.local_file.name}`\n"
+        f"Remote: `{upload.remote_path}`\n"
+        f"Resolved: `{resolved}`\n"
+        f"{_format_size_line(upload)}\n"
+        f"Fallback path used: {fallback}"
+    )
+
+
 def send_gchat_notification(
     config: dict,
-    local_file: Path,
-    upload: SftpUploadResult,
-    job_id: str,
+    exports: list[ExportResult],
+    uploads: list[SftpUploadResult],
     duration_seconds: float,
 ) -> None:
     print("Sending Google Chat notification...")
@@ -401,21 +485,22 @@ def send_gchat_notification(
     timestamp = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
     remote_dir = (config.get("SFTP_REMOTE_DIR") or "").strip()
     configured_dir = remote_dir if remote_dir else "(not set)"
-    resolved = sftp_resolved_path(upload.sftp_cwd, upload.remote_path)
-    fallback = "yes" if upload.used_fallback else "no"
+    cwd_display = format_sftp_cwd(uploads[0].sftp_cwd if uploads else None)
+    file_blocks = "\n\n".join(_format_upload_block(upload) for upload in uploads)
+    job_lines = "\n".join(
+        f"Zoho job ({export.label}): `{export.job_id}`" for export in exports
+    )
     message = {
         "text": (
             "*MTN RW Daily SFTP Upload Complete*\n\n"
             f"Server: `{config['SFTP_HOST']}:{config['SFTP_PORT']}`  "
             f"User: `{config['SFTP_USERNAME']}`\n"
             f"Configured dir: `{configured_dir}`\n"
-            f"Session directory: `{upload.sftp_cwd}`\n"
-            f"Remote file: `{upload.remote_path}`\n"
-            f"Resolved: `{resolved}`\n"
-            f"{_format_size_line(upload)}\n"
-            f"Fallback path used: {fallback}\n\n"
+            f"Session directory: `{cwd_display}`\n\n"
+            f"{file_blocks}\n\n"
             f"Timestamp: {timestamp}\n"
-            f"Zoho job: `{job_id}` · Duration: {format_duration(duration_seconds)}"
+            f"{job_lines}\n"
+            f"Duration: {format_duration(duration_seconds)}"
         )
     }
     try:
@@ -446,27 +531,42 @@ def main():
     access_token = get_zoho_access_token(config)
     print()
 
-    job_id = create_export_job(config, access_token)
-    print()
+    run_timestamp = datetime.now(UTC).strftime("%Y-%m-%d_%H%M%S")
+    export_specs = [
+        ("payins", config["ZOHO_SQL_QUERY"], config["ZOHO_EXPORT_1_FILENAME_PREFIX"]),
+        (
+            "contracts",
+            config["ZOHO_SQL_QUERY_2"],
+            config["ZOHO_EXPORT_2_FILENAME_PREFIX"],
+        ),
+    ]
+    exports: list[ExportResult] = []
+    for label, sql_query, filename_prefix in export_specs:
+        exports.append(
+            run_export(
+                config,
+                access_token,
+                sql_query,
+                filename_prefix,
+                run_timestamp,
+                label,
+            )
+        )
+        print()
 
-    poll_export_job(config, access_token, job_id)
-    print()
-
-    local_file = download_export(config, access_token, job_id)
-    print()
-
-    upload = upload_to_sftp(config, local_file)
+    uploads = upload_files_to_sftp(config, [export.local_file for export in exports])
     print()
 
     duration_seconds = time.monotonic() - run_started
-    send_gchat_notification(config, local_file, upload, job_id, duration_seconds)
+    send_gchat_notification(config, exports, uploads, duration_seconds)
     print()
 
     print("=" * 60)
     print("COMPLETE!")
-    print(f"  File: {local_file.name}")
-    print(f"  SFTP session directory: {upload.sftp_cwd}")
-    print(f"  SFTP: {upload.remote_path}")
+    for export, upload in zip(exports, uploads):
+        print(f"  File: {export.local_file.name}")
+        print(f"  SFTP: {upload.remote_path}")
+    print(f"  SFTP session directory: {format_sftp_cwd(uploads[0].sftp_cwd)}")
     print(f"  Duration: {format_duration(duration_seconds)}")
     print(f"  Notified: Google Chat")
     print("=" * 60)

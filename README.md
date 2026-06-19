@@ -29,7 +29,7 @@ Then edit `.env` with your values.
 
 | Variable | Purpose |
 |----------|---------|
-| `ZOHO_*` | OAuth client, refresh token, org/workspace IDs, and export SQL |
+| `ZOHO_*` | OAuth client, refresh token, org/workspace IDs, and two export SQL queries |
 | `SFTP_HOST`, `SFTP_PORT`, `SFTP_USERNAME`, `SFTP_PASSWORD` | SFTP endpoint and credentials |
 | `SFTP_REMOTE_DIR` | Subfolder under the SFTP account’s login directory (see below) |
 | `GCHAT_WEBHOOK_URL` | Incoming webhook for success notifications |
@@ -75,13 +75,16 @@ Or use the Zoho Analytics API to list organizations and workspaces.
 4. Generate a new app password for "Mail"
 5. Copy the 16-character password to `GMAIL_APP_PASSWORD` in your `.env`
 
-### 6. Configure the SQL query
+### 6. Configure the SQL queries
 
-Set `ZOHO_SQL_QUERY` in your `.env` to the SQL query that exports your data:
+Set `ZOHO_SQL_QUERY` and `ZOHO_SQL_QUERY_2` in your `.env` to the SQL queries that export your data. Both run on every upload.
 
 ```
 ZOHO_SQL_QUERY=select * from "YourTableName"
+ZOHO_SQL_QUERY_2=select * from "YourOtherTableName"
 ```
+
+Files are saved and uploaded as `mtn_rw_payins_YYYY-MM-DD_HHMMSS.csv` and `mtn_rw_contracts_YYYY-MM-DD_HHMMSS.csv` by default. Override with `ZOHO_EXPORT_1_FILENAME_PREFIX` / `ZOHO_EXPORT_2_FILENAME_PREFIX` if needed.
 
 ### 7. Set up Google Chat webhook
 
@@ -103,10 +106,10 @@ python main.py
 The script will:
 
 1. Verify TCP connectivity to `SFTP_HOST:SFTP_PORT`
-2. Obtain a Zoho access token and create a bulk export job
-3. Poll until the export completes
-4. Save the CSV to `./exports/mtn_rw_YYYY-MM-DD_HHMMSS.csv`
-5. Upload to the SFTP server 
+2. Obtain a Zoho access token and create two bulk export jobs
+3. Poll until each export completes
+4. Save the CSVs to `./exports/mtn_rw_payins_YYYY-MM-DD_HHMMSS.csv` and `./exports/mtn_rw_contracts_YYYY-MM-DD_HHMMSS.csv` (same timestamp)
+5. Upload both files to the SFTP server in one session
 6. Post a **success** message to Google Chat
 
 On failure, the script prints errors to the terminal and exits with code `1`. **Failure notifications to Chat are not implemented yet**—only successful runs post to the webhook.
@@ -116,12 +119,12 @@ On failure, the script prints errors to the terminal and exits with code `1`. **
 |-------|---------|
 | **Server / User** | Which SFTP endpoint and account were used |
 | **Configured dir** | `SFTP_REMOTE_DIR` from `.env`, or `(not set)` |
-| **Session directory** | SFTP working directory after login (`getcwd`) |
-| **Remote file** | Path passed to `put()` |
-| **Resolved** | Best-effort full path (session dir + remote file) |
-| **Size** | Local vs remote bytes; ✓ or ⚠️ mismatch |
+| **Session directory** | SFTP working directory after login (`getcwd`), or `(not reported by server)` if the host returns `None` |
+| **Remote file** | Path passed to `put()` for each uploaded file |
+| **Resolved** | Full path when `getcwd` is available; otherwise the remote file path marked as relative |
+| **Size** | Local vs remote bytes per file; ✓ or ⚠️ mismatch |
 | **Fallback path used** | `yes` if upload used `upload/...` instead of the primary path |
-| **Zoho job** | Export job ID for Zoho support |
+| **Zoho job** | Export job ID per file for Zoho support |
 | **Duration** | Wall time for the whole run |
 
 Use **Server**, **User**, **Session directory**, and **Resolved** when coordinating with your SFTP administrator about folder location.
@@ -148,7 +151,7 @@ The script is end-to-end: it needs a working VPN to the SFTP host (if applicable
    python main.py
    ```
 
-5. **Verify:** Check `./exports/` for the CSV, confirm the file on the SFTP server under `SFTP_REMOTE_DIR`, and check the Google Chat space for the success message.
+5. **Verify:** Check `./exports/` for both CSVs, confirm the files on the SFTP server under `SFTP_REMOTE_DIR`, and check the Google Chat space for the success message.
 
 You cannot fully test the SFTP step without network access to that host. There is no separate mock mode in this project.
 
@@ -186,3 +189,9 @@ You cannot fully test the SFTP step without network access to that host. There i
 ### Run failed but nothing in Chat
 
 - Expected today: only **successful** runs post to Google Chat. Check terminal output and exit code for failures.
+
+### Logs show `SFTP session working directory: None` or Chat says `(not reported by server)`
+
+- Some SFTP servers do not implement `getcwd` / realpath; Paramiko then returns `None`. Uploads can still succeed using relative paths like `Yellowdata/file.csv`.
+- The listing `Remote directory listing ('Yellowdata'): [...]` confirms the folder and file on the server.
+- Ask your SFTP administrator for the **absolute path** on disk for your account if you need it for tickets; the script cannot infer it when `getcwd` is missing.
