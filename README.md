@@ -5,7 +5,7 @@ A Python script that exports data from Zoho Analytics, uploads the CSV to an SFT
 ## Prerequisites
 
 - Python 3.10+
-- VPN access to reach the SFTP server (10.150.97.169:9000)
+- VPN access to reach the SFTP server (`SFTP_HOST:SFTP_PORT` in `.env`)
 - Zoho Analytics API credentials (see setup below)
 - A Google Chat space webhook URL
 
@@ -59,7 +59,7 @@ The refresh token is long-lived. The script uses it to get a fresh access token 
 
 **Region (if token requests fail):** Zoho splits accounts by region (US `.com`, EU, India, etc.). If you see errors when obtaining the access token, set `ZOHO_DATA_CENTER` in `.env` to match your org (for example `eu` or `in`). The API Console you use must match the same region (e.g. [api-console.zoho.eu](https://api-console.zoho.eu) for EU). When exchanging the authorization code for a refresh token, the `curl` URL must use the same accounts host (e.g. `https://accounts.zoho.eu/oauth/v2/token` for EU), not only `accounts.zoho.com`.
 
-### 5. Find your Zoho Org ID and Workspace ID
+### 4. Find your Zoho Org ID and Workspace ID
 
 You can find these in the Zoho Analytics URL when viewing your workspace:
 
@@ -67,15 +67,7 @@ You can find these in the Zoho Analytics URL when viewing your workspace:
 
 Or use the Zoho Analytics API to list organizations and workspaces.
 
-### 5. Set up Gmail App Password
-
-1. Go to [Google Account Security](https://myaccount.google.com/security)
-2. Enable 2-Step Verification if not already enabled
-3. Go to **App Passwords** (search for it in account settings)
-4. Generate a new app password for "Mail"
-5. Copy the 16-character password to `GMAIL_APP_PASSWORD` in your `.env`
-
-### 6. Configure the SQL queries
+### 5. Configure the SQL queries
 
 Set `ZOHO_SQL_QUERY` and `ZOHO_SQL_QUERY_2` in your `.env` to the SQL queries that export your data. Both run on every upload.
 
@@ -86,7 +78,7 @@ ZOHO_SQL_QUERY_2=select * from "YourOtherTableName"
 
 Files are saved and uploaded as `mtn_rw_payins_YYYY-MM-DD_HHMMSS.csv` and `mtn_rw_contracts_YYYY-MM-DD_HHMMSS.csv` by default. Override with `ZOHO_EXPORT_1_FILENAME_PREFIX` / `ZOHO_EXPORT_2_FILENAME_PREFIX` if needed.
 
-### 7. Set up Google Chat webhook
+### 6. Set up Google Chat webhook
 
 1. Open the Google Chat **space** that should receive run notifications.
 2. **Apps & integrations** → **Webhooks** → **Add webhook**.
@@ -192,6 +184,6 @@ You cannot fully test the SFTP step without network access to that host. There i
 
 ### Logs show `SFTP session working directory: None` or Chat says `(not reported by server)`
 
-- Some SFTP servers do not implement `getcwd` / realpath; Paramiko then returns `None`. Uploads can still succeed using relative paths like `Yellowdata/file.csv`.
-- The listing `Remote directory listing ('Yellowdata'): [...]` confirms the folder and file on the server.
+- Some SFTP servers do not implement `getcwd` / realpath; Paramiko then returns `None`. Uploads can still succeed using relative paths like `{SFTP_REMOTE_DIR}/file.csv`.
+- The remote directory listing in the logs confirms the folder and file on the server.
 - Ask your SFTP administrator for the **absolute path** on disk for your account if you need it for tickets; the script cannot infer it when `getcwd` is missing.
