@@ -76,7 +76,7 @@ ZOHO_SQL_QUERY=select * from "YourTableName"
 ZOHO_SQL_QUERY_2=select * from "YourOtherTableName"
 ```
 
-Files are saved and uploaded as `mtn_rw_payins_YYYY-MM-DD_HHMMSS.csv` and `mtn_rw_contracts_YYYY-MM-DD_HHMMSS.csv` by default. Override with `ZOHO_EXPORT_1_FILENAME_PREFIX` / `ZOHO_EXPORT_2_FILENAME_PREFIX` if needed.
+Files are saved and uploaded as `mtn_rw_contracts_YYYY_MM_DD-YYYY_MM_DD.csv` (from `ZOHO_SQL_QUERY`) and `mtn_rw_payins_YYYY_MM_DD-YYYY_MM_DD.csv` (from `ZOHO_SQL_QUERY_2`) by default. The date range is today and the previous 2 days (UTC). Override with `ZOHO_EXPORT_1_FILENAME_PREFIX` / `ZOHO_EXPORT_2_FILENAME_PREFIX` if needed.
 
 ### 6. Set up Google Chat webhook
 
@@ -100,7 +100,7 @@ The script will:
 1. Verify TCP connectivity to `SFTP_HOST:SFTP_PORT`
 2. Obtain a Zoho access token and create two bulk export jobs
 3. Poll until each export completes
-4. Save the CSVs to `./exports/mtn_rw_payins_YYYY-MM-DD_HHMMSS.csv` and `./exports/mtn_rw_contracts_YYYY-MM-DD_HHMMSS.csv` (same timestamp)
+4. Save the CSVs to `./exports/mtn_rw_contracts_YYYY_MM_DD-YYYY_MM_DD.csv` and `./exports/mtn_rw_payins_YYYY_MM_DD-YYYY_MM_DD.csv` (same date range: today and previous 2 days)
 5. Upload both files to the SFTP server in one session
 6. Post a **success** message to Google Chat
 
