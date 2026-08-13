@@ -72,10 +72,10 @@ def load_config() -> dict:
     config["ZOHO_ACCOUNTS_BASE"] = acc.rstrip("/")
     config["ZOHO_ANALYTICS_BASE"] = api.rstrip("/")
     config["ZOHO_EXPORT_1_FILENAME_PREFIX"] = (
-        os.getenv("ZOHO_EXPORT_1_FILENAME_PREFIX") or "mtn_rw_contracts"
+        os.getenv("ZOHO_EXPORT_1_FILENAME_PREFIX") or "mtn_rw_Contracts"
     ).strip()
     config["ZOHO_EXPORT_2_FILENAME_PREFIX"] = (
-        os.getenv("ZOHO_EXPORT_2_FILENAME_PREFIX") or "mtn_rw_payins"
+        os.getenv("ZOHO_EXPORT_2_FILENAME_PREFIX") or "mtn_rw_Payins"
     ).strip()
     return config
 
@@ -579,3 +579,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
