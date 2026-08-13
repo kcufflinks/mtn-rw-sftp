@@ -5,7 +5,7 @@ import socket
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime, UTC
+from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 
 import paramiko
@@ -72,10 +72,10 @@ def load_config() -> dict:
     config["ZOHO_ACCOUNTS_BASE"] = acc.rstrip("/")
     config["ZOHO_ANALYTICS_BASE"] = api.rstrip("/")
     config["ZOHO_EXPORT_1_FILENAME_PREFIX"] = (
-        os.getenv("ZOHO_EXPORT_1_FILENAME_PREFIX") or "mtn_rw_payins"
+        os.getenv("ZOHO_EXPORT_1_FILENAME_PREFIX") or "mtn_rw_contracts"
     ).strip()
     config["ZOHO_EXPORT_2_FILENAME_PREFIX"] = (
-        os.getenv("ZOHO_EXPORT_2_FILENAME_PREFIX") or "mtn_rw_contracts"
+        os.getenv("ZOHO_EXPORT_2_FILENAME_PREFIX") or "mtn_rw_payins"
     ).strip()
     return config
 
@@ -531,11 +531,16 @@ def main():
     access_token = get_zoho_access_token(config)
     print()
 
-    run_timestamp = datetime.now(UTC).strftime("%Y-%m-%d_%H%M%S")
+    # Filename date range: today and the previous 2 days (YYYY_MM_DD-YYYY_MM_DD)
+    today = datetime.now(UTC).date()
+    start_date = today - timedelta(days=2)
+    date_range = (
+        f"{start_date.strftime('%Y_%m_%d')}-{today.strftime('%Y_%m_%d')}"
+    )
     export_specs = [
-        ("payins", config["ZOHO_SQL_QUERY"], config["ZOHO_EXPORT_1_FILENAME_PREFIX"]),
+        ("contracts", config["ZOHO_SQL_QUERY"], config["ZOHO_EXPORT_1_FILENAME_PREFIX"]),
         (
-            "contracts",
+            "payins",
             config["ZOHO_SQL_QUERY_2"],
             config["ZOHO_EXPORT_2_FILENAME_PREFIX"],
         ),
@@ -548,7 +553,7 @@ def main():
                 access_token,
                 sql_query,
                 filename_prefix,
-                run_timestamp,
+                date_range,
                 label,
             )
         )
