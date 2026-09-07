@@ -5,7 +5,7 @@ import socket
 import sys
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
 import paramiko
@@ -531,12 +531,7 @@ def main():
     access_token = get_zoho_access_token(config)
     print()
 
-    # Filename date range: today and the previous 2 days (YYYY_MM_DD-YYYY_MM_DD)
-    today = datetime.now(UTC).date()
-    start_date = today - timedelta(days=2)
-    date_range = (
-        f"{start_date.strftime('%Y_%m_%d')}-{today.strftime('%Y_%m_%d')}"
-    )
+    today = datetime.now(UTC).date().strftime("%Y_%m_%d")
     export_specs = [
         ("contracts", config["ZOHO_SQL_QUERY"], config["ZOHO_EXPORT_1_FILENAME_PREFIX"]),
         (
@@ -553,7 +548,7 @@ def main():
                 access_token,
                 sql_query,
                 filename_prefix,
-                date_range,
+                today,
                 label,
             )
         )
